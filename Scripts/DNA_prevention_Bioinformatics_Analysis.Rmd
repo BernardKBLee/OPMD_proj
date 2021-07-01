@@ -1,0 +1,195 @@
+---
+title: "DNA Prevention Analysis"
+author: "Bernard Lee"
+date: '2020-04-03'
+output:
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: inline
+---
+
+#### Load library
+```{r}
+library(edgeR)
+library(tidyverse)
+library(factoextra)
+library(M3C)
+library(COMBAT)
+library(sva)
+#library(readxl)
+#library(sva)
+#library(bladderbatch)
+
+#library(ape)
+#library(ggpubr)
+#library(gridExtra)
+#library(grid)
+```
+
+#### Read in DNA prevention gene expression and metadata
+```{r}
+# Read in DNA prevention gene expression data
+d0 <- read.delim("~/OneDrive - Cancer Research Malaysia/Bryan/2020/Bryan/Data/WC/51_DNA_Prevention_Gene_Counts.txt", row.names = 1, check.names = FALSE)
+
+# Metadata
+metadata <- as.data.frame(colnames(d0))
+names(metadata) <- "Sample"
+d1 <- read.delim("~/OneDrive - Cancer Research Malaysia/Bryan/2020/Bryan/Data/WC/51_samples_metadata.txt")
+metadata <- left_join(metadata, d1)
+metadata$Sample <- as.character(metadata$Sample)
+metadata$Batch <- as.numeric(as.character(metadata$Batch))
+
+# Multidimensional scaling (MDS) plot
+plotMDS(d0, col = as.numeric(metadata$Disease))
+
+# Remove data with zero counts
+cutoff <- 1
+drop <- which(apply(cpm(d0), 1, max) < cutoff)
+d <- d0[-drop,] 
+dim(d) # number of genes left
+
+# Filter low expressed genes
+d0 <- DGEList(d0)
+keep.exprs <- filterByExpr(d0)
+d0 <- d0[keep.exprs, keep.lib.sizes = FALSE]
+summary(keep.exprs)
+
+# Plot DNA prevention sample library size
+barplot(d0$samples$lib.size, names.arg = colnames(d0), las=2, col = metadata$Colour, cex.names = 0.82)
+
+# Adjusting for batch effects with Combat
+d_mat <- as.matrix(d0)
+batch = metadata$Batch
+modcombat = model.matrix(~1, data = metadata)
+combat_d0 = ComBat(dat = d_mat, batch = batch, mod = modcombat, par.prior=TRUE, prior.plots=FALSE)
+
+# UMAP using COMBAT correct data
+par(pty = "s")
+umap(combat_d0, labels = as.factor(metadata$Disease), legendtitle = "Disease Stage")
+#umap(combat_d0, labels = as.factor(metadata$Disease), legendtitle = "Disease Stage", text = metadata$Number)
+
+# tsne using COMBAT corrected data
+tsne(combat_d0, labels = as.factor(metadata$Disease), legendtitle = "Disease Stage")
+#tsne(combat_d0, labels = as.factor(metadata$Disease), legendtitle = "Disease Stage", text = metadata$Number)
+```
+
+#### Normalisation
+```{r}
+d0 <- calcNormFactors(d0, method = "TMM")
+tmm <- cpm(d0, log = TRUE)
+write.table(tmm, "/Users/mac/OneDrive - Cancer Research Malaysia/Kuepeng/2020/New_targets/OPMD/51_DNA_Prevention_Gene_Counts_TMM_Normalized.txt", quote = FALSE, sep = "\t")
+```
+
+#### Design matrix using metadata file
+```{r}
+# Design matrix with the metadata file (For batch correction)
+f <- factor(metadata$Disease)
+batch <- factor(metadata$Batch)
+design <- model.matrix(~0 + f + batch)
+colnames(design) <- c("FEP","Mod_Severe","OSCC","Batch")
+design
+```
+
+#### Calculate dispersion
+```{r}
+y <- estimateDisp(d0, design, robust = TRUE)
+y$common.dispersion
+#plotBCV(y)
+```
+
+#### Quasi-likehood dispersion
+```{r}
+fit <- glmQLFit(y, design, robust = TRUE)
+head(fit$coefficients)
+#plotQLDisp(fit)
+```
+
+#### Differential gene expression
+#### Change the differential analysis phenotype comparison accordingly: 1. Mod_Severe -  FEP; 2. OSCC - FEP; 3. OSCC - Mod_Severe
+```{r}
+con <- makeContrasts(OSCC - Mod_Severe, levels = design)
+qlf <- glmQLFTest(fit, contrast = con)
+topTags(qlf)
+```
+
+#### TREAT
+```{r}
+tr <- glmTreat(fit, contrast = con, lfc = log2(1.2))
+topTags(tr)
+is.de <- decideTestsDGE(tr, adjust.method = "BH")
+summary(is.de)
+```
+
+#### Write out the output
+```{r}
+tab <- topTags(tr, n = Inf, adjust.method = "BH")
+write.table(tab$table, file="~/Desktop/Bryan/Output/DEG/_DNA_prevention_OSCC_vs_ModSevere.txt", sep = '\t', quote = FALSE, row.names = TRUE)
+```
+
+#### DEG analysis
+```{r}
+# Read in the files
+GSE <- read.delim("~/Desktop/Bryan/Output/DEG/_DNA_prevention_OSCC_vs_ModSevere.txt", header = TRUE)
+head(GSE)
+GSE$lgtranspvalue <- -log10(GSE$PValue)
+head(GSE)
+
+par(pch = 16)
+par(pty = "s")
+
+# Plotting the figures
+plot(GSE$logFC, GSE$lgtranspvalue, main='OSCC (n = 6) vs Mod-Severe (n = 31)', xlab=expression('lg'[2]*'FC'), ylab=expression('-lg'[10]*'pvalue'),cex.lab=1.2)
+with(subset(GSE, logFC < 0 & lgtranspvalue >= (2/-logFC)), points(logFC,lgtranspvalue, col = "red"))
+with(subset(GSE, logFC > 0 & lgtranspvalue >= (2/logFC)), points(logFC,lgtranspvalue, col = "blue"))
+
+# Add legend
+#legend("bottomright",legend=c(expression(paste('DOWN: lg'[2]*'FC<0 & -lg'[10]*'pvalue>=(2/-lg'[2]*'FC)')), expression(paste('UP: lg'[2]*'FC>0 & -lg'[10]*'pvalue>=(2/lg'[2]*'FC)'))),pch = 16, col=c("red", "blue"))
+
+# Draw lines -------------------------------------------------------------------
+xpos <- seq(0, 3, 0.01)
+xneg <- seq(-5, 0, 0.01)
+points(xpos, 2/xpos, type="l")
+points(xneg, -2/xneg, type="l")
+
+# Save down-regulated genes ----------------------------------------------------
+GSE_DOWN <- subset(GSE, logFC < 0 & -log10(PValue)>=(2/-logFC) , select=c(logFC, PValue))
+GSE_DOWN <- GSE_DOWN[order(GSE_DOWN$logFC), ]
+nrow(GSE_DOWN)
+GSE_DOWN$GeneName <- rownames(GSE_DOWN)
+GSE_DOWN <- GSE_DOWN[, c(3, 1:2)]
+head(GSE_DOWN)
+write.table(GSE_DOWN, "~/Desktop/Bryan/Output/DEG/_DNA_prevention_OSCC_vs_ModSevere_DOWN.txt", quote = FALSE, sep = '\t', row.names = FALSE)
+
+# Save up-regulated genes ------------------------------------------------------
+GSE_UP <- subset(GSE, logFC > 0 & -log10(PValue)>=(2/logFC) , select=c(logFC, PValue))
+GSE_UP <- GSE_UP[order(GSE_UP$logFC, decreasing = TRUE), ]
+nrow(GSE_UP)
+GSE_UP$GeneName <- rownames(GSE_UP)
+GSE_UP <- GSE_UP[, c(3, 1:2)]
+head(GSE_UP)
+write.table(GSE_UP, "~/Desktop/Bryan/Output/DEG/_DNA_prevention_OSCC_vs_ModSevere_UP.txt", quote = FALSE, sep = '\t', row.names = FALSE)
+```
+
+#### GNGT1
+```{r}
+dat <- read.delim("~/Desktop/Bryan/Data/WC/GNGT1.txt", header = TRUE, check.names = FALSE)
+head(dat)
+ggplot(dat, aes(x = Disease_Stage, y = GNGT1)) +
+  geom_boxplot() +
+  geom_jitter(shape=16, position=position_jitter(0.2)) +
+  geom_signif(comparisons = list(c("Mod-Severe", "FEP")), map_signif_level=TRUE) +
+  labs(y = "GNGT1 expression", x = " Disease Stage") +
+  theme_bw() +
+  theme(aspect.ratio = 1)
+ggsave("~/Desktop/Bryan/Figure/GNGT1.pdf")
+```
+
+
+
+
+#### Session information
+```{r}
+sessionInfo()
+```
+

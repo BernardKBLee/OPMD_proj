@@ -1,0 +1,196 @@
+---
+title: "OPMD WGCNA analysis"
+author: "Hui Shi Saw"
+date: '2020-07-17'
+output:
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: inline
+---
+
+#### 1 Assembly and preprocessing of RNAseq data
+```{r}
+# Load library
+library(tidyverse)
+library(rafalib)
+library(limma)
+library(WGCNA)
+cor <- WGCNA::cor
+options(stringsAsFactors = FALSE)
+
+# Load gene expression data
+RNA_seq <- read.delim("C:/Users/saw hui shi/Desktop/CRMY/R Programming/OPMD/51_Samples_Counts.txt", header = TRUE, row.names = 1, check.names = FALSE)
+dim(RNA_seq)
+names(RNA_seq)
+
+# Need to do some pre-processing to remove genes that are not expressed in more than 20% of the 51 samples
+OPMD_rnaseq <- RNA_seq[apply(RNA_seq, 1, function(x) sum(x == 0)) < ncol(RNA_seq) * 0.8, ]
+
+# Run voom
+RNAseq_voom <- voom(OPMD_rnaseq)$E
+
+# transpose matrix to correlate genes
+WGCNA_matrix <- t(RNAseq_voom[order(apply(RNAseq_voom, 1, mad), decreasing = TRUE), ])
+
+# Check for genes and samples with too many missing values
+gsg <- goodSamplesGenes(WGCNA_matrix, verbose = 5)
+gsg$allOK
+```
+
+#### Sample clustering
+```{r}
+sampleTree <- hclust(dist(WGCNA_matrix), method = "average")
+par(cex = 0.6)
+plot(sampleTree, main = "Sample clustering to detect outliers", sub = "", xlab = "", cex.lab = 1.5,
+cex.axis = 1.5, cex.main = 2)
+```
+
+#### (cancelled) Load clinical trait data
+```{r}
+# Load clinical trait data
+traitData = read.delim("/Users/mac/Desktop/OPMD/Data/51_samples_metadata_edited.txt")
+dim(traitData)
+names(traitData)
+
+# Form a data frame analogous to expression data that will hold the clinical trait
+clinicalSamples = rownames(WGCNA_matrix)
+traitRows = match(clinicalSamples, traitData$Sample)
+datTraits = traitData[traitRows, ]
+rownames(datTraits) = traitData[traitRows, 1]
+collectGarbage()
+```
+
+#### (cancelled) Visualize how the clinical traits (grading) relate to the sample dendrogram
+```{r}
+# Re-cluster samples
+sampleTree2 <- hclust(dist(WGCNA_matrix), method = "average")
+
+# Convert traits to a color representation: white means low, red means high, grey means missing entry
+traitColors <- numbers2colors(as.fumeric(datTraits$Grading), signed = FALSE)
+
+# Plot the sample dendrogram and the colors underneath.
+plotDendroAndColors(sampleTree2, traitColors, groupLabels = "Grading", main = "Sample dendrogram and trait heatmap")
+
+# Save data
+save(WGCNA_matrix, datTraits, file = "/Users/mac/Desktop/OPMD/Library/51_OPMD_01-dataInput.RData")
+```
+
+
+#### 2 Automatic network construction and module detection
+```{r}
+# Choose a set of soft-thresholding powers
+powers <- c(c(1:10), seq(from = 12, to = 20, by = 2))
+
+
+# Call the network topology analysis function
+sft <- pickSoftThreshold(WGCNA_matrix, powerVector = powers, verbose = 5)
+
+# Power estimate
+sft$powerEstimate
+sft$fitIndices
+
+# Plot the results:
+par(mfrow = c(1,2))
+cex1 <- 0.86
+
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2], xlab = "Soft Threshold (power)", ylab = "Scale Free Topology Model Fit,signed R^2", type = "n", main = paste("Scale independence"))
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2], labels = powers, cex = cex1, col="red")
+# this line corresponds to using an R^2 cut-off of h
+abline(h = 0.86, col = "red")
+
+# Mean connectivity as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], sft$fitIndices[,5], xlab = "Soft Threshold (power)", ylab = "Mean Connectivity", type="n", main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels = powers, cex = cex1, col="red")
+```
+#### Constructing the gene network and identifying modules
+```{r}
+net <- blockwiseModules(WGCNA_matrix, power = 5, TOMType = "unsigned", minModuleSize = 30, reassignThreshold = 0, mergeCutHeight = 0.25, numericLabels = TRUE, pamRespectsDendro = FALSE, saveTOMs = TRUE, saveTOMFileBase = "OPMDTOM", verbose = 5, maxBlockSize = 20000)
+
+# no. of modules identified
+table(net$colors)
+```
+
+#### Display dendrogram
+```{r}
+# Convert labels to colors for plotting
+mergedColors <- labels2colors(net$colors)
+
+# Plot the dendrogram and the module colors underneath
+plotDendroAndColors(net$dendrograms[[1]], mergedColors[net$blockGenes[[1]]], "Module colors", dendroLabels = FALSE, hang = 0.03, addGuide = TRUE, guideHang = 0.05)
+```
+
+#### Save the module assignment and module eigengene information
+```{r}
+moduleLabels <- net$colors
+moduleColors <- labels2colors(net$colors)
+MEs <- net$MEs
+geneTree <- net$dendrograms[[1]]
+save(MEs, moduleLabels, moduleColors, geneTree, file = "/Users/mac/Desktop/OPMD/Library/51_OPMD_NetworkConstruction_Auto.RData")
+```
+
+#### (cancelled) Quantifying module–trait associations
+```{r}
+# Define numbers of genes and samples
+nGenes <- ncol(WGCNA_matrix)
+nSamples <- nrow(WGCNA_matrix)
+
+# Recalculate MEs with color labels
+MEs0 <- moduleEigengenes(WGCNA_matrix, moduleColors)$eigengenes
+MEs <- orderMEs(MEs0)
+moduleTraitCor <- cor(MEs, as.fumeric(datTraits$Grading), use = "p")
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nSamples)
+```
+
+#### (cancelled) Starts here
+```{r}
+load("51_OPMD-Auto_step.RData")
+sizeGrWindow(10,6)
+# Will display correlations and their p-values
+textMatrix = paste(signif(moduleTraitCor, 2), "\n(",
+signif(moduleTraitPvalue, 1), ")", sep = "");
+dim(textMatrix) = dim(moduleTraitCor)
+par(mar = c(6, 8.5, 3, 3));
+
+# Display the correlation values within a heatmap plot
+labeledHeatmap(Matrix = moduleTraitCor,
+xLabels = names(datTraits),
+yLabels = names(MEs),
+ySymbols = names(MEs),
+#### colorLabels = FALSE,
+colors = greenWhiteRed(50),
+textMatrix = textMatrix,
+setStdMargins = FALSE,
+cex.text = 0.5,
+zlim = c(-1,1),
+main = paste("Module-trait relationships"))
+```
+
+#### Get module genes
+# Check genes in each module
+```{r}
+table(net$colors)
+
+# Change the numerical and directory accordingly
+# This is for module 1
+module_Genes <- which(net$colors == 1)
+module_Genes
+write.table(module_Genes, "C:/Users/saw hui shi/Desktop/CRMY/R Programming/OPMD/moduleGenes_1.txt", sep = "\t", quote = FALSE)
+```
+
+#### Extract Gene Expression to construct heatmap
+```{r}
+library(tidyverse)
+
+# Load module genes_30
+dat <- read_delim("C:/Users/saw hui shi/Desktop/CRMY/R Programming/OPMD/Module_GeneExpression/moduleGenes_30_Name.txt", delim = "\t")
+
+# Extract gene expression
+geneExpression <- RNAseq_voom[which(rownames(RNAseq_voom) %in% dat$GeneName), ]
+
+# Write the gene expression
+write.table(geneExpression, "C:/Users/saw hui shi/Desktop/CRMY/R Programming/OPMD/Module_GeneExpression/module30_GeneExpression.txt", sep = "\t", quote = FALSE)
+```
+
+
